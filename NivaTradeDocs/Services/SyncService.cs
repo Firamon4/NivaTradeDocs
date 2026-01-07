@@ -1,22 +1,23 @@
 ﻿using Newtonsoft.Json;
 using NivaTradeDocs.Data;
+using NivaTradeDocs.Repositories;
 using System.Net.Http;
+using System.Text;
 using System.Windows;
 using Microsoft.EntityFrameworkCore;
-using System.Collections.Generic;
-using System.Threading.Tasks;
-using System;
+using NivaTradeDocs.Data.DTO;
 
 namespace NivaTradeDocs.Services
 {
     public class SyncService
     {
-        // Якщо жорстко задав в API 0.0.0.0:5000, то тут лишаємо localhost
-        private readonly string _apiUrl = "http://localhost:5000/api/sync";
+        private readonly string _apiUrl = "http://192.168.200.132:5000/api/sync";
         private readonly string _apiKey = "SecretKey123";
-        private readonly string _shopId = "All";
+        private readonly string _shopId = "All"; // Або "Shop_01"
 
-        // Головний метод синхронізації (Товари + Контрагенти)
+        // =========================================================
+        // 1. ОТРИМАННЯ ДАНИХ З 1С 
+        // =========================================================
         public async Task SyncDataAsync()
         {
             using var client = new HttpClient();
@@ -24,11 +25,10 @@ namespace NivaTradeDocs.Services
 
             try
             {
-                // 1. Отримуємо пакети
                 var response = await client.GetAsync($"{_apiUrl}/pull?target={_shopId}");
                 if (!response.IsSuccessStatusCode)
                 {
-                    MessageBox.Show($"Сервер відповів помилкою: {response.StatusCode}");
+                    MessageBox.Show($"Помилка сервера: {response.StatusCode}");
                     return;
                 }
 
@@ -37,160 +37,144 @@ namespace NivaTradeDocs.Services
 
                 if (packages == null || packages.Count == 0)
                 {
-                    MessageBox.Show("Нових даних немає.");
+                    MessageBox.Show("Дані актуальні (нових пакетів немає).");
+                    // Навіть якщо немає вхідних, пробуємо відправити вихідні (Замовлення)
+                    await PushOrdersAsync();
                     return;
                 }
 
                 using var db = new PosDbContext();
                 db.Database.EnsureCreated();
 
+                // Підключаємо репозиторії
+                var prodRepo = new ProductRepository(db);
+                var clientRepo = new CounterpartyRepository(db);
+                var specRepo = new SpecificationRepository(db);
+
                 int successCount = 0;
 
-                // 2. Обробляємо пакети ПО ОДНОМУ
                 foreach (var package in packages)
                 {
-                    bool packageProcessedSuccessfully = false;
-
+                    bool success = false;
                     try
                     {
-                        // === РОЗПОДІЛЬНИЙ ЦЕНТР (SWITCH) ===
                         switch (package.DataType)
                         {
                             case "Product":
-                                var productsData = JsonConvert.DeserializeObject<List<ProductDto>>(package.Payload);
-                                if (productsData != null)
-                                {
-                                    foreach (var pDto in productsData) await UpsertProduct(db, pDto);
-                                }
+                                var products = JsonConvert.DeserializeObject<List<ProductDto>>(package.Payload);
+                                if (products != null) foreach (var p in products) await prodRepo.UpsertAsync(p);
                                 break;
 
                             case "Counterparty":
-                                var clientsData = JsonConvert.DeserializeObject<List<CounterpartyDto>>(package.Payload);
-                                if (clientsData != null)
-                                {
-                                    foreach (var cDto in clientsData) await UpsertCounterparty(db, cDto);
-                                }
+                                var clients = JsonConvert.DeserializeObject<List<CounterpartyDto>>(package.Payload);
+                                if (clients != null) foreach (var c in clients) await clientRepo.UpsertAsync(c);
                                 break;
 
-                            default:
-                                // Якщо прийшов невідомий тип - просто ігноруємо, але вважаємо обробленим,
-                                // щоб видалити з черги і не застрягати.
+                            case "Specification":
+                                var specs = JsonConvert.DeserializeObject<List<SpecificationDto>>(package.Payload);
+                                if (specs != null) foreach (var s in specs) await specRepo.UpsertAsync(s);
                                 break;
                         }
 
-                        // ВАЖЛИВО: Зберігаємо зміни в локальну базу ПЕРЕД тим, як підтвердити серверу
                         await db.SaveChangesAsync();
-
-                        // Якщо ми дійшли сюди - значить SQLite прийняла дані без помилок
-                        packageProcessedSuccessfully = true;
+                        success = true;
                     }
                     catch (Exception ex)
                     {
-                        var err = ex.InnerException != null ? ex.InnerException.Message : ex.Message;
-                        MessageBox.Show($"Помилка при збереженні пакету {package.Id} ({package.DataType}): {err}\nСинхронізацію зупинено.");
-                        return;
+                        var msg = ex.InnerException != null ? ex.InnerException.Message : ex.Message;
+                        MessageBox.Show($"Помилка пакету {package.Id}: {msg}");
                     }
 
-                    // 3. Тільки якщо все успішно - кажемо серверу видалити пакет
-                    if (packageProcessedSuccessfully)
+                    if (success)
                     {
-                        var ackResponse = await client.DeleteAsync($"{_apiUrl}/ack?id={package.Id}");
-                        if (ackResponse.IsSuccessStatusCode)
-                        {
-                            successCount++;
-                        }
+                        await client.DeleteAsync($"{_apiUrl}/ack?id={package.Id}");
+                        successCount++;
                     }
                 }
 
                 if (successCount > 0)
-                    MessageBox.Show($"Успішно завантажено пакетів: {successCount}");
+                    MessageBox.Show($"Оновлено пакетів: {successCount}");
+
+                // Після успішного отримання - відправляємо свої замовлення
+                await PushOrdersAsync();
             }
             catch (Exception ex)
             {
-                MessageBox.Show($"Загальна помилка: {ex.Message}");
+                MessageBox.Show($"Критична помилка: {ex.Message}");
             }
         }
 
-        private async Task UpsertCounterparty(PosDbContext db, CounterpartyDto dto)
+        // =========================================================
+        // 2. ВІДПРАВКА ЗАМОВЛЕНЬ В 1С
+        // =========================================================
+        public async Task PushOrdersAsync()
         {
-            var existing = await db.Counterparties.FindAsync(dto.Uid);
+            using var db = new PosDbContext();
+            db.Database.EnsureCreated();
 
-            if (existing == null)
+            // Беремо всі замовлення, які ще НЕ відправлені
+            var newOrders = await db.Orders
+                                    .Include(o => o.Items)
+                                    .Where(o => !o.IsSent)
+                                    .ToListAsync();
+
+            if (newOrders.Count == 0) return; // Нічого відправляти
+
+            using var client = new HttpClient();
+            client.DefaultRequestHeaders.Add("X-Api-Key", _apiKey);
+
+            int sentCount = 0;
+
+            foreach (var order in newOrders)
             {
-                db.Counterparties.Add(new Counterparty
+                try
                 {
-                    Id = dto.Uid,
-                    Name = dto.Name,
-                    Code = dto.Code,
-                    TaxId = dto.TaxId,
-                    IsDeleted = dto.IsDeleted
-                });
+                    // Конвертуємо в DTO
+                    var orderDto = new OrderDto
+                    {
+                        Uid = order.Id, // ВАЖЛИВО: Ми передаємо СВІЙ GUID
+                        Date = order.Date,
+                        CounterpartyUid = order.CounterpartyId,
+                        Items = order.Items.Select(i => new OrderItemDto
+                        {
+                            ProductUid = i.ProductId,
+                            Quantity = i.Quantity,
+                            Price = i.Price
+                        }).ToList()
+                    };
+
+                    // Пакуємо
+                    var payloadJson = JsonConvert.SerializeObject(new List<OrderDto> { orderDto });
+                    var package = new
+                    {
+                        source = _shopId,
+                        target = "1C_Main",
+                        dataType = "Order",
+                        payload = payloadJson
+                    };
+
+                    var content = new StringContent(JsonConvert.SerializeObject(package), Encoding.UTF8, "application/json");
+
+                    // Шлемо на сервер
+                    var res = await client.PostAsync($"{_apiUrl}/push", content);
+
+                    if (res.IsSuccessStatusCode)
+                    {
+                        order.IsSent = true; // Помічаємо як відправлене
+                        sentCount++;
+                    }
+                }
+                catch
+                {
+                    // Якщо одне замовлення не пішло - не страшно, спробуємо наступного разу
+                }
             }
-            else
+
+            if (sentCount > 0)
             {
-                existing.Name = dto.Name;
-                existing.Code = dto.Code;
-                existing.TaxId = dto.TaxId;
-                existing.IsDeleted = dto.IsDeleted;
+                await db.SaveChangesAsync();
+                MessageBox.Show($"Успішно відправлено замовлень: {sentCount}");
             }
         }
-
-        private async Task UpsertProduct(PosDbContext db, ProductDto dto)
-        {
-            // Використовуємо FindAsync, щоб уникнути дублів в межах одного пакету
-            var existing = await db.Products.FindAsync(dto.Uid);
-
-            if (existing == null)
-            {
-                db.Products.Add(new Product
-                {
-                    Id = dto.Uid,
-                    Name = dto.Name,
-                    Code = dto.Code,
-                    Barcode = dto.Barcode,
-                    Articul = dto.Articul,
-                    IsFolder = dto.IsFolder,
-                    ParentId = string.IsNullOrEmpty(dto.ParentUid) ? null : dto.ParentUid
-                });
-            }
-            else
-            {
-                existing.Name = dto.Name;
-                existing.Code = dto.Code;
-                existing.Barcode = dto.Barcode;
-                existing.Articul = dto.Articul;
-                existing.IsFolder = dto.IsFolder;
-                existing.ParentId = string.IsNullOrEmpty(dto.ParentUid) ? null : dto.ParentUid;
-            }
-        }
-    }
-
-    // DTO класи
-    public class SyncPackageDto
-    {
-        public int Id { get; set; }
-        public string DataType { get; set; }
-        public string Payload { get; set; }
-    }
-
-    public class ProductDto
-    {
-        public string Uid { get; set; }
-        public string Name { get; set; }
-        public string Code { get; set; }
-        public string Barcode { get; set; }
-        public string Articul { get; set; }
-        public bool   IsFolder { get; set; }
-        public bool   IsDeleted { get; set; }
-        public string ParentUid { get; set; }
-    }
-
-    public class CounterpartyDto
-    {
-        public string Uid { get; set; }
-        public string Name { get; set; }
-        public string Code { get; set; }
-        public string TaxId { get; set; }
-        public bool   IsDeleted { get; set; }
-    }
+    } 
 }
