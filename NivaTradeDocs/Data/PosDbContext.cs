@@ -16,7 +16,7 @@ namespace NivaTradeDocs.Data
 
         protected override void OnConfiguring(DbContextOptionsBuilder optionsBuilder)
         {
-            optionsBuilder.UseSqlite("Data Source=niva_trade_v7.db");
+            optionsBuilder.UseSqlite("Data Source=niva_pos.db");
         }
     }
 }
