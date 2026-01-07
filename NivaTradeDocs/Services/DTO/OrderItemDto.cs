@@ -4,7 +4,7 @@ using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 
-namespace NivaTradeDocs.Data.DTO
+namespace NivaTradeDocs.Services.DTO
 {
     public class OrderItemDto
     {

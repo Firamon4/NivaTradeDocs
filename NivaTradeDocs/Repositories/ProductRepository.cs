@@ -1,6 +1,7 @@
 ﻿using NivaTradeDocs.Data;
-using NivaTradeDocs.Services; // Для DTO
-using System.Threading.Tasks;
+using NivaTradeDocs.Models; 
+using NivaTradeDocs.Services.DTO;
+
 
 namespace NivaTradeDocs.Repositories
 {

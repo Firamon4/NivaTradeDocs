@@ -1,4 +1,4 @@
-﻿namespace NivaTradeDocs.Data.DTO
+﻿namespace NivaTradeDocs.Services.DTO
 {
     public class SyncPackageDto
     {

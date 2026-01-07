@@ -5,7 +5,7 @@ using System.Net.Http;
 using System.Text;
 using System.Windows;
 using Microsoft.EntityFrameworkCore;
-using NivaTradeDocs.Data.DTO;
+using NivaTradeDocs.Services.DTO;
 
 namespace NivaTradeDocs.Services
 {
