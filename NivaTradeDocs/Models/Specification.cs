@@ -7,6 +7,7 @@
         public DateTime Date { get; set; }
         public string CounterpartyId { get; set; }
         public bool IsDeleted { get; set; }
+        public bool IsApproved { get; set; }
         public List<SpecificationItem> Items { get; set; } = new List<SpecificationItem>();
     }
 }

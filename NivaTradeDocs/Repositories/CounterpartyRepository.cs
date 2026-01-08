@@ -1,4 +1,5 @@
-﻿using NivaTradeDocs.Data;
+﻿using Microsoft.EntityFrameworkCore;
+using NivaTradeDocs.Data;
 using NivaTradeDocs.Models;
 using NivaTradeDocs.Services.DTO;
 
@@ -35,6 +36,13 @@ namespace NivaTradeDocs.Repositories
                 existing.TaxId = dto.TaxId;
                 existing.IsDeleted = dto.IsDeleted;
             }
+        }
+        public async Task<List<Counterparty>> GetAllAsync()
+        {
+            return await _context.Counterparties
+                                 .Where(c => !c.IsDeleted)
+                                 .OrderBy(c => c.Name)
+                                 .ToListAsync();
         }
     }
 }

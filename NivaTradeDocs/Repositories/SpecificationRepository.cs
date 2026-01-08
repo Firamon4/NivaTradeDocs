@@ -29,6 +29,7 @@ namespace NivaTradeDocs.Repositories
                     Date = dto.Date,
                     CounterpartyId = dto.CounterpartyUid,
                     IsDeleted = dto.IsDeleted,
+                    IsApproved = dto.IsApproved,
                     Items = new List<SpecificationItem>()
                 };
 
@@ -53,11 +54,12 @@ namespace NivaTradeDocs.Repositories
                 existing.Date = dto.Date;
                 existing.CounterpartyId = dto.CounterpartyUid;
                 existing.IsDeleted = dto.IsDeleted;
+                existing.IsApproved = dto.IsApproved;
 
                 // Видаляємо старі рядки і пишемо нові
                 _context.SpecificationItems.RemoveRange(existing.Items);
 
-                if (dto.Items != null && !dto.IsDeleted)
+                if (dto.Items != null && !dto.IsDeleted && dto.IsApproved)
                 {
                     foreach (var itemDto in dto.Items)
                     {
@@ -71,6 +73,46 @@ namespace NivaTradeDocs.Repositories
                     }
                 }
             }
+        }
+
+        public async Task<List<SpecItemDisplayModel>> GetLatestItemsByCounterpartyAsync(string counterpartyId)
+        {
+            // 1. Шукаємо останню специфікацію (сортуємо за Датою спаданням)
+            var latestSpec = await _context.Specifications
+                                           .Where(s => s.CounterpartyId == counterpartyId && !s.IsDeleted && s.IsApproved)
+                                           .OrderByDescending(s => s.Date)
+                                           .FirstOrDefaultAsync();
+
+            if (latestSpec == null) return new List<SpecItemDisplayModel>();
+
+            // 2. Беремо її рядки
+            var specItems = await _context.SpecificationItems
+                                          .Where(si => si.SpecificationId == latestSpec.Id)
+                                          .ToListAsync();
+
+            // 3. З'єднуємо з товарами, щоб отримати Назви
+            var productIds = specItems.Select(si => si.ProductId).ToList();
+            var products = await _context.Products
+                                         .Where(p => productIds.Contains(p.Id))
+                                         .ToDictionaryAsync(p => p.Id, p => p.Name);
+
+            // 4. Формуємо красивий список для екрану
+            var result = new List<SpecItemDisplayModel>();
+            foreach (var item in specItems)
+            {
+                if (products.TryGetValue(item.ProductId, out var prodName))
+                {
+                    result.Add(new SpecItemDisplayModel
+                    {
+                        ProductId = item.ProductId,
+                        ProductName = prodName,
+                        Price = item.Price,
+                        Unit = item.Unit ?? "шт"
+                    });
+                }
+            }
+
+            return result.OrderBy(x => x.ProductName).ToList();
         }
     }
 }
